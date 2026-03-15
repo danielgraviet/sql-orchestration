@@ -1,0 +1,2 @@
+- if a file can be regenerated from source code, you usually don't commit it. 
+- git is bad at binary files. git stores diffs line by line between versions. they can't be diffed meaningfully so its not smart to keep them in git. 

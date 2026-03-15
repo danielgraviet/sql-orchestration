@@ -1,319 +1,99 @@
+# sql-orchestration
 
-# The Daytona-500
+Demo story for a mixed audience: **3–5 specialized Claude agents** compete (and optionally collaborate) to generate and validate SQL queries inside **isolated Daytona sandboxes**. The orchestrator scores each attempt on correctness, performance, and safety, then surfaces the best result.
 
-Run **500 parallel AI code experiments** safely using sandbox infrastructure.
-
-This demo shows how AI agents can explore solution spaces by launching **hundreds of isolated execution environments** in parallel, evaluating each attempt, and selecting the best result.
-
-Instead of trying one solution at a time, the agent behaves like it has **500 brains working simultaneously**.
+The message: you don’t need 500 workers to feel like you have 500 brains— a small, diverse team of agents plus sandbox isolation delivers quality, speed, and safety.
 
 ---
 
-## Why This Demo Exists
+## Why This Demo
 
-Most AI agents today follow a sequential workflow:
-
-```
-generate code
-run code
-evaluate result
-retry
-```
-
-This approach is slow and fragile.
-
-The **500-Brain Agent** demonstrates a better pattern:
-
-```
-generate many solutions
-run them in parallel
-evaluate results
-select the best one
-```
-
-By running experiments inside disposable sandboxes, the agent can safely test **untrusted AI-generated code at massive scale**.
+- Sequential agents are slow and risky; they run untrusted code directly.
+- Sandboxes let us explore many ideas safely and in parallel.
+- A small team of opinionated agents (planner, optimizer, tester, safety cop, explainer) tends to beat a single “do everything” agent.
 
 ---
 
-## Architecture
+## Scenario (what the audience sees)
 
-```
-+---------------------------+
-|         LLM Agent         |
-|  Generates code variants  |
-+------------+--------------+
-             |
-             v
-+---------------------------+
-|       Orchestrator        |
-|  Launches sandbox workers |
-+------------+--------------+
-             |
-             v
-+--------------------------------------+
-|          Sandbox Workers             |
-| 500 isolated environments executing  |
-| generated code and returning scores  |
-+--------------------------------------+
-```
+Given a natural-language request (e.g., “Top 10 riders by trips last month”), agents must produce a performant SQL query against a sample dataset. Each agent ships a tiny Python snippet that builds the SQL, plus optional indexes/hints. Daytona sandboxes execute the query against the dataset, measure latency, check results, and report metrics.
 
-Each sandbox:
+**Roles (3–5 agents):**
 
-* receives a generated solution
-* executes it
-* runs benchmark tests
-* reports the results
-
-The orchestrator then chooses the best-performing solution.
+1) Query Planner – aims for correctness and readability.
+2) Performance Hacker – minimizes latency and scan cost.
+3) Safety Cop – checks for injection / destructive statements.
+4) Regression Tester – runs hidden edge cases.
+5) Narrator (optional) – explains the chosen plan for humans.
 
 ---
 
-## Demo Problem
+## Flow
 
-The agent attempts to solve a programming challenge:
-
-**Write the fastest Python function to detect whether a number is prime.**
-
-Instead of producing a single implementation, the agent generates **hundreds of candidate solutions** and evaluates them in parallel.
-
----
-
-## Features
-
-* Parallel execution across **500+ sandboxes**
-* Safe execution of **AI-generated code**
-* Automatic benchmarking and scoring
-* Failure isolation
-* Real-time execution metrics
-
-Example metrics during execution:
-
-```
-Sandboxes launched: 500
-Running: 500
-Completed: 213
-Failed: 17
-Average runtime: 2.4s
-```
+1. **Generate variants** – Each role prompts Claude with its perspective; outputs live in `solutions/`.
+2. **Isolated execution** – `sandbox_runner.py` boots a fresh Daytona sandbox per variant and uploads the candidate plus `benchmark.py`.
+3. **Benchmark & safety checks** – `benchmark.py` validates results, measures runtime/memory, and rejects unsafe SQL.
+4. **Score & select** – Orchestrator aggregates JSON results and picks the best-performing safe query.
+5. **Observe** – Metrics like `sandboxes_running`, `success_rate`, `p50_latency_ms`, `est_cost` stream during the run.
 
 ---
 
-## Repository Structure
+## Safety Story
 
-```
-.
-├── agent.py
-├── orchestrator.py
-├── benchmark.py
-├── prompts
-│   └── generate_solution.txt
-├── solutions
-│   └── generated code variants
-├── sandbox_runner.py
-└── README.md
-```
-
-### Key Components
-
-**agent.py**
-
-Generates candidate code implementations using an LLM.
-
-**orchestrator.py**
-
-Launches sandbox environments and distributes workloads.
-
-**sandbox_runner.py**
-
-Executes candidate code inside a sandbox and runs benchmarks.
-
-**benchmark.py**
-
-Test suite used to evaluate each candidate implementation.
+- Each agent’s code and SQL run in a disposable sandbox (filesystem, process, and resource isolation).
+- Timeouts and auto-stop/auto-delete keep costs predictable.
+- “Bad” behavior (DROP TABLE, infinite loops, network egress) is contained and surfaced as a failure, not an outage.
 
 ---
 
-## How It Works
+## Repository Map (today)
 
-### 1. Generate Code Variants
+- `agent.py` – generates candidate implementations with Claude. Swap the prompt to emit SQL builders instead of `is_prime` functions.
+- `benchmark.py` – in-sandbox evaluator. Currently targets a prime-checking exercise; replace the test harness with your SQL dataset + assertions.
+- `sandbox_runner.py` – creates sandboxes, uploads a candidate + benchmark, executes, parses JSON, always destroys the sandbox.
+- `solutions/` – generated candidates land here.
+- `main.py` – thin entrypoint; extend to orchestrate the full multi-agent loop.
 
-The agent generates multiple candidate implementations.
-
-Example prompt:
-
-```
-Generate a Python function to determine if a number is prime.
-Focus on performance.
-```
-
-Outputs are saved as:
-
-```
-solution_001.py
-solution_002.py
-solution_003.py
-...
-```
+> Note: The code presently benchmarks prime-checking functions. The demo script above describes the SQL variant you’ll present. Adjust `agent.py` prompts and `benchmark.py` accordingly (see “Adapting to SQL” below).
 
 ---
 
-### 2. Launch Parallel Sandboxes
+## Run It (prototype)
 
-The orchestrator launches sandbox environments for each candidate.
-
-Example workflow:
-
-```python
-for solution in solutions:
-    launch_sandbox(solution)
+```bash
+export ANTHROPIC_API_KEY=...
+python agent.py          # generate candidate implementations into solutions/
+# Wire your orchestrator to call sandbox_runner.run_in_sandbox() for each file
 ```
 
-Each sandbox runs independently.
+Streaming metrics and selection logic live in the orchestrator you add on top of `sandbox_runner.py`.
 
 ---
 
-### 3. Execute and Benchmark
+## Adapting to SQL (what to change)
 
-Inside each sandbox:
-
-1. The candidate code is executed
-2. Benchmark tests are run
-3. Performance metrics are recorded
-
-Example output:
-
-```
-Accuracy: PASS
-Execution time: 1.81ms
-Memory usage: 4.2MB
-Score: 97
-```
-
-Failures are isolated and reported without affecting other runs.
+- **Prompt** (`agent.py`): ask for a function that returns a SQL string (and optional index DDL) given the task text and table schema.
+- **Benchmark** (`benchmark.py`):
+  - Load a fixture DB (e.g., SQLite file) inside the sandbox.
+  - Execute the generated SQL safely (whitelist read-only ops, parameterize inputs).
+  - Assert correctness vs. expected rows; measure latency/rows scanned.
+  - Fail fast on disallowed statements.
+- **Metrics**: emit `latency_ms`, `rows_scanned`, `explain_cost`, and a composite score.
+- **Orchestrator**: run 3–5 agents with the role prompts above; keep them in independent sandboxes to prove isolation.
 
 ---
 
-### 4. Select Best Solution
+## What to Emphasize in the Talk
 
-Results from all sandboxes are aggregated.
-
-The orchestrator ranks candidates based on:
-
-* correctness
-* execution speed
-* resource usage
-
-The best implementation is returned.
+- Parallelism you can trust: every attempt runs in its own disposable sandbox.
+- Small, diverse agent team > single agent; roles drive better search coverage.
+- Infrastructure, not a toy: same pattern fits codegen, data cleaning, fuzzing—just swap the benchmark.
+- Cost control: cap sandboxes, short timeouts, auto-delete.
 
 ---
 
-## Safety
+## Quick FAQ
 
-Running AI-generated code locally can be dangerous.
-
-Examples of problematic behaviors:
-
-```
-rm -rf /
-while True: pass
-pip install malicious-package
-```
-
-Sandbox environments provide:
-
-* filesystem isolation
-* process containment
-* resource limits
-* disposable execution environments
-
-Each sandbox is destroyed after execution.
-
----
-
-## Observability
-
-During execution, the system surfaces metrics such as:
-
-```
-sandboxes_running
-sandbox_success_rate
-average_runtime
-estimated_cost
-```
-
-This allows developers to monitor large-scale agent experimentation in real time.
-
----
-
-## Key Idea
-
-Instead of relying purely on reasoning, AI agents can combine reasoning with **large-scale experimentation**.
-
-Sandbox infrastructure enables agents to:
-
-* run untrusted code safely
-* explore many ideas simultaneously
-* evaluate results quickly
-* improve outcomes through search
-
----
-
-## Running the Demo
-
-Example workflow:
-
-```
-python agent.py
-```
-
-This will:
-
-1. Generate candidate solutions
-2. Launch sandbox environments
-3. Execute benchmarks
-4. Display the best-performing solution
-
----
-
-## Expected Output
-
-```
-Launching 500 sandboxes...
-
-Completed: 500
-Successful: 463
-Failed: 37
-
-Best Solution
--------------
-Accuracy: 100%
-Execution Time: 1.41ms
-Sandbox: 341
-```
-
----
-
-## Use Cases
-
-This architecture applies to many agent workflows:
-
-* automated code generation
-* scientific experimentation
-* algorithm discovery
-* fuzz testing
-* data analysis
-* secure execution of AI-generated programs
-
----
-
-## Takeaway
-
-AI agents increasingly need to **write and execute code**.
-
-To do this safely and efficiently, they require infrastructure that supports:
-
-* isolated execution
-* disposable environments
-* large-scale parallel experimentation
-
-Sandbox orchestration provides this missing layer in the **AI agent stack**.
+- **Why 3–5 agents, not 500?** Quality and interpretability win; sandbox isolation still scales if you need more.
+- **What about safety?** Sandboxes, read-only DB fixtures, statement whitelists, and timeouts keep bad queries contained.
+- **How hard is it to swap tasks?** Change the prompt + benchmark; the sandbox pattern stays the same.
