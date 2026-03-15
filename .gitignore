@@ -3,3 +3,6 @@ data/rides.db
 solutions/
 node_modules/
 frontend/dist/
+__pycache__/
+*.pyc
+demo_output.txt
