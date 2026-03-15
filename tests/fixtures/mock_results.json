@@ -1,0 +1,57 @@
+[
+  {
+    "sandbox_id": "solution_001",
+    "role": "Query Planner",
+    "passed": true,
+    "error": null,
+    "latency_ms": 1.57,
+    "rows_returned": 10,
+    "explain_cost": 10000,
+    "score": 389.1,
+    "sql_length": 180
+  },
+  {
+    "sandbox_id": "solution_002",
+    "role": "Performance Hacker",
+    "passed": true,
+    "error": null,
+    "latency_ms": 1.21,
+    "rows_returned": 10,
+    "explain_cost": 8000,
+    "score": 412.5,
+    "sql_length": 150
+  },
+  {
+    "sandbox_id": "solution_003",
+    "role": "Safety Cop",
+    "passed": true,
+    "error": null,
+    "latency_ms": 1.63,
+    "rows_returned": 10,
+    "explain_cost": 10000,
+    "score": 371.2,
+    "sql_length": 210
+  },
+  {
+    "sandbox_id": "solution_004",
+    "role": "Regression Tester",
+    "passed": true,
+    "error": null,
+    "latency_ms": 1.89,
+    "rows_returned": 10,
+    "explain_cost": 10000,
+    "score": 345.8,
+    "sql_length": 240
+  },
+  {
+    "sandbox_id": "solution_005",
+    "role": "Narrator",
+    "passed": false,
+    "error": "FAILED_CORRECTNESS: ROW_COUNT_MISMATCH: got 8, expected 10",
+    "latency_ms": null,
+    "rows_returned": null,
+    "explain_cost": null,
+    "score": 0,
+    "sql_length": 320
+  }
+]

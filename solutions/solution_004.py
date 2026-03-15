@@ -1,48 +1,41 @@
 # role: Regression Tester
-# rationale: The query derives exact calendar-month boundaries using SQLite's 'start of month' modifier so it handles year and month rollovers correctly (e.g., January → December of the prior year). A LEFT JOIN from riders into the aggregated trip counts ensures riders with zero trips in the window are visible, and COALESCE converts NULLs to 0. A secondary ORDER BY rider_id tiebreaker makes the top-10 ranking fully deterministic when multiple riders share the same trip count.
+# rationale: The date window uses SQLite's 'start of month' modifier with '-1 month' to correctly handle year-rollover boundaries (e.g., January wrapping back to December), and the upper bound is exclusive to avoid including the first instant of the current month. A tiebreaker on rider_id ensures deterministic top-10 results when multiple riders share the same trip count. The composite index on (rider_id, started_at) lets SQLite satisfy both the join and the date-range filter with a single index scan.
 
 SQL = """
-WITH last_month_bounds AS (
-    -- EDGE CASE: compute exact calendar-month boundaries to avoid partial-month inclusion
-    -- 'start of month' gives first day of current month; stepping back 1 month gives first day of last month
-    SELECT
-        date('now', 'start of month', '-1 month')          AS period_start,  -- inclusive lower bound
-        date('now', 'start of month')                       AS period_end      -- exclusive upper bound (first day of current month)
-),
-trip_counts AS (
-    SELECT
-        t.rider_id,
-        COUNT(*) AS trip_count
-    FROM trips t
-    CROSS JOIN last_month_bounds b
-    WHERE
-        -- EDGE CASE: use >= / < on the DATETIME column so midnight of the last day is included
-        -- and the first instant of the current month is excluded (handles year/month rollover correctly)
-        t.started_at >= b.period_start
-        AND t.started_at <  b.period_end
-    GROUP BY t.rider_id
-),
-all_riders AS (
-    -- EDGE CASE: LEFT JOIN ensures riders with zero trips last month are represented;
-    -- they will show trip_count = 0 via COALESCE and naturally rank below active riders
-    SELECT
-        r.rider_id,
-        COALESCE(tc.trip_count, 0) AS trip_count
-    FROM riders r
-    LEFT JOIN trip_counts tc ON r.rider_id = tc.rider_id  -- EDGE CASE: rider_id is INTEGER PK, no NULL join keys possible, but LEFT JOIN still guards against riders absent from trips entirely
-)
 SELECT
-    rider_id,
-    trip_count
-FROM all_riders
-WHERE trip_count > 0          -- EDGE CASE: exclude riders with zero trips so the top-10 list is meaningful; remove this line if zero-trip riders should appear
+    r.rider_id,
+    -- EDGE CASE: COUNT(t.trip_id) instead of COUNT(*) so riders with zero qualifying trips
+    -- still return 0 if they appear via a LEFT JOIN (though here we use INNER JOIN intentionally
+    -- to exclude non-riders; see riders CTE note below)
+    COUNT(t.trip_id) AS trip_count
+FROM (
+    -- EDGE CASE: Anchor to ALL riders so we could detect zero-trip riders if needed;
+    -- using riders table as the base ensures rider_id is never NULL from the left side
+    SELECT rider_id FROM riders
+) AS r
+INNER JOIN trips AS t
+    ON t.rider_id = r.rider_id
+    -- EDGE CASE: rider_id could theoretically be NULL in trips (despite NOT NULL constraint);
+    -- INNER JOIN naturally excludes any such rows
+    -- EDGE CASE: "last month" uses exact calendar-month boundaries to avoid
+    -- off-by-one errors at month/year rollovers (e.g., Jan -> Dec of prior year).
+    -- date('now','start of month','-1 month') correctly handles January -> December rollover.
+    AND t.started_at >= date('now', 'start of month', '-1 month')
+    -- EDGE CASE: upper bound is exclusive start of current month, so trips at exactly
+    -- midnight on the 1st of the current month are excluded (correct behaviour).
+    AND t.started_at <  date('now', 'start of month')
+GROUP BY r.rider_id
 ORDER BY
     trip_count DESC,
-    rider_id   ASC             -- EDGE CASE: tiebreaker on rider_id (deterministic, stable sort when trip counts are equal)
-LIMIT 10;                      -- EDGE CASE: if fewer than 10 riders took trips last month, LIMIT safely returns however many exist (no error on empty/small result set)
+    -- EDGE CASE: ties in trip_count would produce non-deterministic ordering;
+    -- tiebreak on rider_id (ascending) gives a stable, reproducible top-10.
+    r.rider_id ASC
+-- EDGE CASE: if fewer than 10 riders took any trips last month, LIMIT 10 simply
+-- returns however many rows exist (empty result set is handled gracefully).
+LIMIT 10;
 """
 
-INDEX_DDL = """CREATE INDEX IF NOT EXISTS idx_trips_started_at_rider ON trips (started_at, rider_id);"""
+INDEX_DDL = """CREATE INDEX IF NOT EXISTS idx_trips_rider_started ON trips (rider_id, started_at);"""
 
 def get_sql() -> str:
     return SQL.strip()

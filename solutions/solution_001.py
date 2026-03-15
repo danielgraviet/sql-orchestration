@@ -1,5 +1,5 @@
 # role: Query Planner
-# rationale: The CTE `last_month_bounds` isolates the date range logic so it is computed once and reused. `trip_counts` aggregates trips per rider filtered to the previous calendar month using `date()` for SQLite compatibility. The composite index on `(started_at, rider_id)` supports the date-range filter and allows the rider_id grouping to be resolved from the index alone.
+# rationale: A CTE computes the exact start and end dates of the previous calendar month using SQLite date functions, keeping the filter logic readable and reusable. Trips are filtered and aggregated by rider in a second CTE, then joined to riders for plan/tenure context. The composite index on (started_at, rider_id) supports the date-range filter and allows a covering scan for the GROUP BY without touching the full table.
 
 SQL = """
 -- Top 10 riders by number of trips completed in the previous calendar month
@@ -15,7 +15,8 @@ trip_counts AS (
         COUNT(t.trip_id) AS trip_count
     FROM trips t
     CROSS JOIN last_month_bounds b
-    WHERE date(t.started_at) BETWEEN b.month_start AND b.month_end
+    WHERE date(t.started_at) >= b.month_start
+      AND date(t.started_at) <= b.month_end
     GROUP BY t.rider_id
 )
 SELECT

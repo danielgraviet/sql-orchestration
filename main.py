@@ -1,97 +1,108 @@
 """
 main.py
 
-Demo entrypoint. Runs the SQL agent competition and prints the leaderboard.
+Demo entrypoint. Runs the SQL agent competition and streams live progress.
 
 Usage:
     python main.py
     python main.py --task "Busiest stations by departures last week"
-    python main.py --dry-run
+    python main.py --force      # regenerate solutions, ignore cache
+    python main.py --dry-run    # simulate run without API or Daytona
 """
 
 import argparse
 import asyncio
+import json
 import sys
+import time
+from pathlib import Path
 
 from daytona_sdk import AsyncDaytona
 
 from data.schema_loader import get_schema_string
 from orchestrator import run_competition
+from reporter import Event, EventType, Reporter
 
 DEFAULT_TASK = "Top 10 riders by trips last month"
+FIXTURES_PATH = Path("tests/fixtures/mock_results.json")
 
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--task", default=DEFAULT_TASK)
-    parser.add_argument("--force", action="store_true", help="Regenerate solutions from the API, ignoring cache")
+    parser.add_argument("--task",    default=DEFAULT_TASK)
+    parser.add_argument("--force",   action="store_true", help="Regenerate solutions from API, ignore cache")
+    parser.add_argument("--dry-run", action="store_true", help="Simulate run without API or Daytona")
     args = parser.parse_args()
+
+    reporter = Reporter()
+
+    if args.dry_run:
+        await _dry_run(args.task, reporter)
+        return
 
     schema = get_schema_string()
 
     try:
         async with asyncio.timeout(120):
             async with AsyncDaytona() as daytona:
-                result = await run_competition(args.task, schema, daytona, force=args.force)
+                await run_competition(
+                    args.task, schema, daytona,
+                    force=args.force,
+                    reporter=reporter,
+                )
     except TimeoutError:
         print("Competition timed out after 120s")
         sys.exit(1)
 
-    _print_results(result)
 
+async def _dry_run(task: str, reporter: Reporter):
+    """Simulate a competition run using fixture data. No API or Daytona needed."""
+    mock_results = json.loads(FIXTURES_PATH.read_text())
 
-def _print_results(result: dict):
-    print(f"\n=== SQL Agent Competition ===")
-    print(f"Task: {result['task']}\n")
+    reporter.on_event(Event(type=EventType.GENERATION_START))
+    await asyncio.sleep(0.4)
+    reporter.on_event(Event(type=EventType.GENERATION_DONE, total=len(mock_results)))
 
-    # header
-    print(f"{'Rank':<5} {'Role':<20} {'Pass':<6} {'Score':<10} {'Latency(ms)':<13} {'Rows':<6} {'Explain Cost'}")
-    print("-" * 72)
+    for i, r in enumerate(mock_results):
+        reporter.on_event(Event(
+            type=EventType.SANDBOX_START,
+            sandbox_id=r["sandbox_id"],
+            role=r["role"],
+        ))
 
-    for rank, r in enumerate(result["all_results"], start=1):
-        passed_mark = "✓" if r.get("passed") else "✗"
-        score = r.get("score") or 0
-        latency = f"{r['latency_ms']:.2f}" if r.get("latency_ms") is not None else "-"
-        rows = str(r["rows_returned"]) if r.get("rows_returned") is not None else "-"
-        cost = str(r["explain_cost"]) if r.get("explain_cost") is not None else "-"
-        role = r.get("role") or r.get("sandbox_id") or "-"
-        print(f"{rank:<5} {role:<20} {passed_mark:<6} {score:<10} {latency:<13} {rows:<6} {cost}")
-        if not r.get("passed") and r.get("error"):
-            print(f"      error: {r['error']}")
+    await asyncio.sleep(0.3)
 
-    print()
-    print(f"Sandboxes run:  {result['sandboxes_run']}")
-    print(f"Success rate:   {result['success_count']}/{result['sandboxes_run']}")
-    if result["p50_latency_ms"] is not None:
-        print(f"P50 latency:    {result['p50_latency_ms']:.2f}ms")
+    for i, r in enumerate(mock_results):
+        await asyncio.sleep(0.2)
+        event_type = EventType.SANDBOX_DONE if r["passed"] else EventType.SANDBOX_FAILED
+        reporter.on_event(Event(
+            type=event_type,
+            sandbox_id=r["sandbox_id"],
+            role=r["role"],
+            result=r,
+            completed=i + 1,
+            total=len(mock_results),
+        ))
 
-    winner = result["winner"]
-    role = winner.get("role") or winner.get("sandbox_id")
-    print(f"\nWinner: {role} (score: {winner.get('score', 0)})")
+    mock_results_sorted = sorted(mock_results, key=lambda r: r.get("score", 0), reverse=True)
+    passing   = [r for r in mock_results_sorted if r.get("passed")]
+    winner    = passing[0] if passing else mock_results_sorted[0]
+    latencies = [r["latency_ms"] for r in passing if r.get("latency_ms") is not None]
+    p50       = sorted(latencies)[len(latencies) // 2] if latencies else None
 
-    # get the winning SQL from the solution file
-    winning_sql = _read_winner_sql(winner.get("sandbox_id"))
-    if winning_sql:
-        print("\n--- Winning SQL ---")
-        print(winning_sql)
+    competition_result = {
+        "task": task,
+        "winner": {**winner, "rationale": "Uses a covering index on (rider_id, started_at) to avoid a full table scan, pushing the date filter before the join."},
+        "winner_sql": "SELECT r.rider_id, COUNT(*) AS trip_count\nFROM trips t\nJOIN riders r ON t.rider_id = r.rider_id\nWHERE t.started_at >= date('now', '-30 days')\nGROUP BY r.rider_id\nORDER BY trip_count DESC\nLIMIT 10;",
+        "all_results": mock_results_sorted,
+        "sandboxes_run": len(mock_results),
+        "success_count": len(passing),
+        "failed_count": len(mock_results) - len(passing),
+        "p50_latency_ms": p50,
+        "best_score": winner.get("score", 0),
+    }
 
-
-def _read_winner_sql(sandbox_id: str | None) -> str | None:
-    """Read the SQL from the winner's solution file on disk."""
-    if not sandbox_id:
-        return None
-    try:
-        import importlib.util
-        from pathlib import Path
-        path = Path("solutions") / f"{sandbox_id}.py"
-        if not path.exists():
-            return None
-        spec = importlib.util.spec_from_file_location("sol", path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod.get_sql()
-    except Exception:
-        return None
+    reporter.on_event(Event(type=EventType.COMPETITION_DONE, result=competition_result))
 
 
 if __name__ == "__main__":

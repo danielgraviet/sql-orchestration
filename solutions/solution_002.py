@@ -1,5 +1,5 @@
 # role: Performance Hacker
-# rationale: Filter trips to last calendar month using date boundary arithmetic so the index range scan is tight. A composite index on (started_at, rider_id) lets SQLite satisfy both the WHERE filter and the GROUP BY aggregation from the index alone, avoiding a full table scan and minimizing I/O.
+# rationale: Filter trips to last calendar month using date boundary arithmetic so the index range scan is tight. The composite index on (started_at, rider_id) lets SQLite satisfy both the WHERE filter and the GROUP BY aggregation with a single index-only scan, avoiding a full table scan on trips.
 
 SQL = """
 SELECT rider_id, COUNT(*) AS trip_count
@@ -11,7 +11,7 @@ ORDER BY trip_count DESC
 LIMIT 10;
 """
 
-INDEX_DDL = """CREATE INDEX IF NOT EXISTS idx_trips_started_rider ON trips(started_at, rider_id);"""
+INDEX_DDL = """CREATE INDEX idx_trips_started_rider ON trips(started_at, rider_id);"""
 
 def get_sql() -> str:
     return SQL.strip()

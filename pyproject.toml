@@ -1,5 +1,5 @@
 [project]
-name = "500-brain-agent"
+name = "sql-orchestration"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -9,8 +9,11 @@ dependencies = [
     "datetime>=6.0",
     "daytona>=0.151.0",
     "daytona-sdk>=0.151.0",
+    "fastapi>=0.115.0",
     "pathlib>=1.0.1",
     "python-dotenv>=1.2.2",
+    "sse-starlette>=2.1.0",
+    "uvicorn[standard]>=0.32.0",
 ]
 
 [dependency-groups]
