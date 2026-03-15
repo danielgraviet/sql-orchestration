@@ -38,7 +38,12 @@ def get_sql() -> str:
 
 
 def _build_user_message(task: str, schema: str) -> str:
-    return f"Task: {task}\n\nSchema:\n{schema}"
+    return (
+        f"Database: SQLite (use SQLite date functions like date('now', '-30 days'), "
+        f"not INTERVAL or PostgreSQL syntax)\n\n"
+        f"Task: {task}\n\n"
+        f"Schema:\n{schema}"
+    )
 
 
 def _strip_fences(text: str) -> str:

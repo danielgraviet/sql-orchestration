@@ -1,30 +1,35 @@
 # role: Query Planner
-# rationale: The CTE filters and aggregates trips to the previous calendar month using date truncation for clean month boundaries, then joins to riders for profile details. The composite index on (rider_id, started_at) supports both the date range filter and the GROUP BY in a single index scan, avoiding a full table scan on what is likely the largest table.
+# rationale: The CTE `last_month_bounds` isolates the date range logic so it is computed once and reused. `trip_counts` aggregates trips per rider filtered to the previous calendar month using `date()` for SQLite compatibility. The composite index on `(started_at, rider_id)` supports the date-range filter and allows the rider_id grouping to be resolved from the index alone.
 
 SQL = """
-WITH last_month_trips AS (
-    -- Filter trips to only those that started in the previous calendar month
+-- Top 10 riders by number of trips completed in the previous calendar month
+WITH last_month_bounds AS (
+    -- Compute the first and last day of the previous calendar month
     SELECT
-        rider_id,
-        COUNT(*) AS trip_count
-    FROM trips
-    WHERE
-        started_at >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
-        AND started_at <  DATE_TRUNC('month', CURRENT_DATE)
-    GROUP BY rider_id
+        date('now', 'start of month', '-1 month')        AS month_start,
+        date('now', 'start of month', '-1 day')           AS month_end
+),
+trip_counts AS (
+    SELECT
+        t.rider_id,
+        COUNT(t.trip_id) AS trip_count
+    FROM trips t
+    CROSS JOIN last_month_bounds b
+    WHERE date(t.started_at) BETWEEN b.month_start AND b.month_end
+    GROUP BY t.rider_id
 )
 SELECT
-    r.rider_id,
+    tc.rider_id,
     r.plan,
     r.member_since,
-    lmt.trip_count
-FROM last_month_trips lmt
-JOIN riders r ON r.rider_id = lmt.rider_id
-ORDER BY lmt.trip_count DESC
+    tc.trip_count
+FROM trip_counts tc
+JOIN riders r ON r.rider_id = tc.rider_id
+ORDER BY tc.trip_count DESC
 LIMIT 10;
 """
 
-INDEX_DDL = """CREATE INDEX idx_trips_rider_started ON trips (rider_id, started_at);"""
+INDEX_DDL = """CREATE INDEX IF NOT EXISTS idx_trips_started_at_rider ON trips (started_at, rider_id);"""
 
 def get_sql() -> str:
     return SQL.strip()

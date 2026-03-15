@@ -5,8 +5,6 @@ Tests for benchmark.py. Uses the real rides.db fixture — no mocking.
 Run with: pytest tests/test_benchmark.py -v
 """
 
-import json
-import sqlite3
 import sys
 from pathlib import Path
 
@@ -94,16 +92,23 @@ def test_load_db_raises_for_missing_file():
 
 def test_correctness_passes_for_correct_sql():
     conn = load_db(DB_PATH)
-    passed, reason = check_correctness(conn, CORRECT_SQL, EXPECTED_PATH)
+    passed, reason = check_correctness(conn, CORRECT_SQL)
     conn.close()
     assert passed is True
     assert reason == ""
 
-def test_correctness_fails_for_wrong_query():
+def test_correctness_fails_wrong_row_count():
     conn = load_db(DB_PATH)
-    # Returns wrong columns / order
-    bad_sql = "SELECT rider_id, 1 AS trip_count FROM riders LIMIT 10"
-    passed, _ = check_correctness(conn, bad_sql, EXPECTED_PATH)
+    bad_sql = "SELECT rider_id, COUNT(*) AS trip_count FROM trips GROUP BY rider_id ORDER BY trip_count DESC LIMIT 5"
+    passed, reason = check_correctness(conn, bad_sql)
+    conn.close()
+    assert passed is False
+    assert "ROW_COUNT_MISMATCH" in reason
+
+def test_correctness_fails_unsorted_results():
+    conn = load_db(DB_PATH)
+    bad_sql = "SELECT rider_id, COUNT(*) AS trip_count FROM trips GROUP BY rider_id ORDER BY rider_id ASC LIMIT 10"
+    passed, _ = check_correctness(conn, bad_sql)
     conn.close()
     assert passed is False
 

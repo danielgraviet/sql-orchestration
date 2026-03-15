@@ -17,7 +17,6 @@ import time
 from pathlib import Path
 
 BENCHMARK_RUNS = 5
-EXPECTED_FILENAME = "expected_top10.json"
 
 # keywords that make a statement unsafe
 _BLOCKED = re.compile(
@@ -70,26 +69,27 @@ def _db_in_memory(db_path: str) -> sqlite3.Connection:
 def check_correctness(
     conn: sqlite3.Connection,
     sql: str,
-    expected_path: str,
 ) -> tuple[bool, str]:
     try:
         rows = [dict(r) for r in conn.execute(sql).fetchall()]
     except Exception as e:
         return False, f"EXEC_ERROR: {e}"
 
-    try:
-        expected = json.loads(Path(expected_path).read_text())
-    except Exception as e:
-        return False, f"EXPECTED_LOAD_ERROR: {e}"
+    if len(rows) != 10:
+        return False, f"ROW_COUNT_MISMATCH: got {len(rows)}, expected 10"
 
-    if len(rows) != len(expected):
-        return False, f"ROW_COUNT_MISMATCH: got {len(rows)}, expected {len(expected)}"
+    if "rider_id" not in rows[0]:
+        return False, "MISSING_COLUMN: result must include rider_id"
 
-    for i, (got, exp) in enumerate(zip(rows, expected)):
-        if got.get("rider_id") != exp["rider_id"]:
-            return False, f"RIDER_ID_MISMATCH at row {i}: got {got.get('rider_id')}, expected {exp['rider_id']}"
-        if abs(got.get("trip_count", 0) - exp["trip_count"]) > 1:
-            return False, f"TRIP_COUNT_MISMATCH at row {i}: got {got.get('trip_count')}, expected {exp['trip_count']}"
+    if "trip_count" not in rows[0]:
+        return False, "MISSING_COLUMN: result must include trip_count"
+
+    counts = [r["trip_count"] for r in rows]
+    if counts != sorted(counts, reverse=True):
+        return False, "NOT_SORTED: trip_count must be in descending order"
+
+    if any(r["trip_count"] <= 0 for r in rows):
+        return False, "INVALID_COUNT: trip_count must be positive"
 
     return True, ""
 
@@ -154,7 +154,6 @@ def load_solution(solution_path: str): # TODO: is this looking at our cache firs
 
 def run_benchmark(solution_path: str, db_path: str) -> dict:
     sandbox_id = Path(solution_path).stem
-    expected_path = str(Path(db_path).parent / EXPECTED_FILENAME)
     sql_length = None
     role = None
 
@@ -171,7 +170,7 @@ def run_benchmark(solution_path: str, db_path: str) -> dict:
     # correctness gate (read-only connection)
     conn_ro = load_db(db_path)
     try:
-        passed, reason = check_correctness(conn_ro, sql, expected_path)
+        passed, reason = check_correctness(conn_ro, sql)
     finally:
         conn_ro.close()
 

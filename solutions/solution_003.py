@@ -1,40 +1,28 @@
 # role: Safety Cop
-# rationale: The query joins riders to trips, filters to the previous calendar month using only built-in SQLite date functions (no user input), groups by rider, and returns the top 10 by trip count with a deterministic tiebreaker. The composite index on (rider_id, started_at) supports both the join and the date-range filter efficiently, avoiding a full table scan on the typically large trips table.
+# rationale: The query filters trips to the previous calendar month using SQLite date literals, groups by rider, and returns the top 10 by trip count with a tie-breaking sort on rider_id for determinism. The composite index on (started_at, rider_id) supports the date-range filter and allows the grouping aggregation to be resolved efficiently from the index alone.
 
 SQL = """
 -- SAFETY:
 -- 1. Read-only SELECT query; no INSERT, UPDATE, DELETE, DROP, CREATE, or ALTER.
--- 2. No string concatenation or dynamic SQL used.
--- 3. All table and column references are static and schema-verified.
--- 4. Date range for 'last month' is computed entirely from built-in date functions
---    (no user input accepted), eliminating injection risk.
--- 5. LIMIT 10 is a hard-coded literal, not a parameter.
--- 6. No subquery accepts external input; all filters are deterministic.
-
+-- 2. No string concatenation or dynamic SQL; all values are literals.
+-- 3. Date range uses SQLite-native date() with relative modifiers; no user input.
+-- 4. 'Last month' is computed as the calendar month prior to today using
+--    date('now','start of month','-1 month') and date('now','start of month'),
+--    ensuring a precise, injection-safe boundary.
+-- 5. LIMIT is a hard-coded integer literal, not a parameter.
+-- 6. All referenced columns and tables exist in the provided schema.
 SELECT
-    r.rider_id,
-    r.plan,
-    COUNT(t.trip_id) AS trips_last_month
-FROM riders r
-JOIN trips t
-    ON t.rider_id = r.rider_id
-WHERE
-    t.started_at >= DATE(
-        'now', 'start of month', '-1 month'
-    )
-    AND t.started_at <  DATE(
-        'now', 'start of month'
-    )
-GROUP BY
-    r.rider_id,
-    r.plan
-ORDER BY
-    trips_last_month DESC,
-    r.rider_id ASC          -- deterministic tiebreaker
+    t.rider_id,
+    COUNT(t.trip_id) AS trip_count
+FROM trips AS t
+WHERE t.started_at >= date('now', 'start of month', '-1 month')
+  AND t.started_at <  date('now', 'start of month')
+GROUP BY t.rider_id
+ORDER BY trip_count DESC, t.rider_id ASC
 LIMIT 10;
 """
 
-INDEX_DDL = """CREATE INDEX IF NOT EXISTS idx_trips_rider_started ON trips (rider_id, started_at);"""
+INDEX_DDL = """CREATE INDEX IF NOT EXISTS idx_trips_started_at_rider ON trips (started_at, rider_id);"""
 
 def get_sql() -> str:
     return SQL.strip()
