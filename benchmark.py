@@ -1,165 +1,242 @@
 """
 benchmark.py
 
-Runs inside each Daytona sandbox. Imports the candidate `is_prime` function,
-validates correctness against a ground-truth test suite, then measures
-execution time and memory usage.
+Runs inside each Daytona sandbox. Loads a candidate SQL solution, runs it
+through safety, correctness, and performance checks, then emits one JSON
+result to stdout.
 
-Output: a single JSON object printed to stdout.
+Usage: python benchmark.py <solution_path> <db_path>
 """
 
+import importlib.util
 import json
+import re
+import sqlite3
 import sys
 import time
-import tracemalloc
-import importlib.util
 from pathlib import Path
 
-
-# ---------------------------------------------------------------------------
-# Ground-truth test suite
-# ---------------------------------------------------------------------------
-
-TEST_CASES = [
-    (-1,           False),  # negative
-    (0,            False),  # zero
-    (1,            False),  # one is not prime by definition
-    (2,            True),   # smallest prime
-    (3,            True),   # small prime
-    (4,            False),  # small composite
-    (5,            True),
-    (9,            False),  # 3*3
-    (13,           True),
-    (17,           True),
-    (25,           False),  # 5*5
-    (97,           True),   # two-digit prime
-    (100,          False),  # round composite
-    (561,          False),  # Carmichael number — tricky for naive implementations
-    (1_000_003,    True),   # large prime
-    (1_000_000_007, True),  # classic CS prime
-    (1_000_000_008, False), # large composite
-]
-
-BENCHMARK_INPUTS = [2, 97, 1_000_003, 1_000_000_007]
 BENCHMARK_RUNS = 5
+EXPECTED_FILENAME = "expected_top10.json"
+
+# keywords that make a statement unsafe
+_BLOCKED = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|REPLACE|UPSERT|DROP|CREATE|ALTER|TRUNCATE|RENAME"
+    r"|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|ATTACH|DETACH)\b",
+    re.IGNORECASE,
+)
+
+# strip -- line comments and /* */ block comments before safety checks
+_LINE_COMMENT = re.compile(r"--[^\n]*")
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 
-# ---------------------------------------------------------------------------
-# Load candidate solution
-# ---------------------------------------------------------------------------
+def check_safety(sql: str) -> tuple[bool, str]:
+    if not sql or not sql.strip():
+        return False, "EMPTY_SQL"
 
-def load_is_prime(solution_path: str):
-    spec = importlib.util.spec_from_file_location("solution", solution_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    if not hasattr(module, "is_prime"):
-        raise AttributeError("Solution does not define a function named 'is_prime'")
-    return module.is_prime
+    clean = _LINE_COMMENT.sub(" ", sql)
+    clean = _BLOCK_COMMENT.sub(" ", clean)
 
+    match = _BLOCKED.search(clean)
+    if match:
+        return False, f"BLOCKED_KEYWORD: {match.group().upper()}"
 
-# ---------------------------------------------------------------------------
-# Correctness gate
-# ---------------------------------------------------------------------------
+    # multiple statements: semicolon followed by more non-whitespace
+    if re.search(r";\s*\S", clean):
+        return False, "MULTIPLE_STATEMENTS"
 
-def check_correctness(is_prime_fn) -> tuple[bool, str]:
-    for n, expected in TEST_CASES:
-        try:
-            result = is_prime_fn(n)
-        except Exception as e:
-            return False, f"Exception on input {n}: {e}"
-        if result != expected:
-            return False, f"Wrong answer for {n}: expected {expected}, got {result}"
     return True, ""
 
 
-# ---------------------------------------------------------------------------
-# Performance measurement
-# ---------------------------------------------------------------------------
+def load_db(db_path: str) -> sqlite3.Connection: # TODO: explain what this code does. when you say load_db, is it just connecting to our local sqlite db?
+    if not Path(db_path).exists():
+        raise FileNotFoundError(f"Database not found: {db_path}")
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def measure_performance(is_prime_fn) -> tuple[float, float]:
-    """Returns (median_execution_time_ms, peak_memory_mb)."""
+
+def _db_in_memory(db_path: str) -> sqlite3.Connection:
+    """Copy the fixture into a writable in-memory database (for index application)."""
+    src = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    mem = sqlite3.connect(":memory:")
+    src.backup(mem)
+    src.close()
+    mem.row_factory = sqlite3.Row
+    return mem
+
+
+def check_correctness(
+    conn: sqlite3.Connection,
+    sql: str,
+    expected_path: str,
+) -> tuple[bool, str]:
+    try:
+        rows = [dict(r) for r in conn.execute(sql).fetchall()]
+    except Exception as e:
+        return False, f"EXEC_ERROR: {e}"
+
+    try:
+        expected = json.loads(Path(expected_path).read_text())
+    except Exception as e:
+        return False, f"EXPECTED_LOAD_ERROR: {e}"
+
+    if len(rows) != len(expected):
+        return False, f"ROW_COUNT_MISMATCH: got {len(rows)}, expected {len(expected)}"
+
+    for i, (got, exp) in enumerate(zip(rows, expected)):
+        if got.get("rider_id") != exp["rider_id"]:
+            return False, f"RIDER_ID_MISMATCH at row {i}: got {got.get('rider_id')}, expected {exp['rider_id']}"
+        if abs(got.get("trip_count", 0) - exp["trip_count"]) > 1:
+            return False, f"TRIP_COUNT_MISMATCH at row {i}: got {got.get('trip_count')}, expected {exp['trip_count']}"
+
+    return True, ""
+
+
+def measure_performance(conn: sqlite3.Connection, sql: str) -> dict:
     times = []
-
-    tracemalloc.start()
+    rows = []
     for _ in range(BENCHMARK_RUNS):
-        start = time.perf_counter()
-        for n in BENCHMARK_INPUTS:
-            is_prime_fn(n)
-        end = time.perf_counter()
-        times.append((end - start) * 1000)  # ms
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+        start = time.perf_counter() # what does the perf_counter do? 
+        rows = conn.execute(sql).fetchall()
+        times.append((time.perf_counter() - start) * 1000)
 
     times.sort()
     median_ms = times[BENCHMARK_RUNS // 2]
-    peak_mb = peak / (1024 * 1024)
-    return median_ms, peak_mb
+
+    explain_cost = _explain_cost(conn, sql)
+
+    return {
+        "latency_ms": round(median_ms, 4),
+        "rows_returned": len(rows),
+        "explain_cost": explain_cost,
+    }
 
 
-# ---------------------------------------------------------------------------
-# Scoring
-# ---------------------------------------------------------------------------
-
-def compute_score(execution_time_ms: float, memory_mb: float) -> float:
-    time_score = (1 / execution_time_ms) * 0.6
-    mem_score = (1 / memory_mb) * 0.4 if memory_mb > 0 else 0
-    return round((time_score + mem_score) * 1000, 4)
-
-
-def count_lines(solution_path: str) -> int:
-    return sum(1 for line in Path(solution_path).read_text().splitlines() if line.strip())
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def run_benchmark(solution_path: str) -> dict:
-    sandbox_id = Path(solution_path).stem  # e.g. "solution_007"
-
+def _explain_cost(conn: sqlite3.Connection, sql: str) -> int:
+    """Sum estimated row scans from EXPLAIN QUERY PLAN output. Returns -1 if unparseable."""
     try:
-        is_prime_fn = load_is_prime(solution_path)
+        plan = conn.execute(f"EXPLAIN QUERY PLAN {sql}").fetchall()
+        total = 0
+        found = False
+        for row in plan:
+            detail = str(row[-1])
+            match = re.search(r"~(\d+)", detail)
+            if match:
+                total += int(match.group(1))
+                found = True
+        return total if found else -1
+    except Exception:
+        return -1
+
+
+def compute_score(
+    latency_ms: float,
+    explain_cost: int,
+    passed_correctness: bool,
+) -> float:
+    if not passed_correctness:
+        return 0.0
+    base = (1 / latency_ms) * 500
+    penalty = max(0, explain_cost / 100_000) * 100 if explain_cost > 0 else 0
+    return round(max(0.0, base - penalty), 4)
+
+
+def load_solution(solution_path: str): # TODO: is this looking at our cache first? 
+    spec = importlib.util.spec_from_file_location("solution", solution_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    if not hasattr(mod, "get_sql"):
+        raise AttributeError("Solution missing get_sql()")
+    return mod
+
+
+def run_benchmark(solution_path: str, db_path: str) -> dict:
+    sandbox_id = Path(solution_path).stem
+    expected_path = str(Path(db_path).parent / EXPECTED_FILENAME)
+    sql_length = None
+    role = None
+
+    # load solution
+    try:
+        mod = load_solution(solution_path)
+        sql = mod.get_sql()
+        index_ddl = getattr(mod, "INDEX_DDL", None)
+        role = _read_role_comment(solution_path)
+        sql_length = len(sql)
     except Exception as e:
-        return {
-            "sandbox_id": sandbox_id,
-            "passed": False,
-            "error": f"FAILED_LOAD: {e}",
-            "execution_time_ms": None,
-            "memory_mb": None,
-            "score": 0,
-            "lines_of_code": None,
-        }
+        return _error_result(sandbox_id, role, f"FAILED_LOAD: {e}", sql_length)
 
-    passed, reason = check_correctness(is_prime_fn)
+    # correctness gate (read-only connection)
+    conn_ro = load_db(db_path)
+    try:
+        passed, reason = check_correctness(conn_ro, sql, expected_path)
+    finally:
+        conn_ro.close()
+
     if not passed:
-        return {
-            "sandbox_id": sandbox_id,
-            "passed": False,
-            "error": f"FAILED_CORRECTNESS: {reason}",
-            "execution_time_ms": None,
-            "memory_mb": None,
-            "score": 0,
-            "lines_of_code": count_lines(solution_path),
-        }
+        return _error_result(sandbox_id, role, f"FAILED_CORRECTNESS: {reason}", sql_length)
 
-    execution_time_ms, memory_mb = measure_performance(is_prime_fn)
-    score = compute_score(execution_time_ms, memory_mb)
+    # performance measurement
+    # apply any index on an in-memory copy so the read-only fixture is untouched
+    conn_bench = _db_in_memory(db_path)
+    try:
+        if index_ddl:
+            try:
+                conn_bench.execute(index_ddl)
+                conn_bench.commit()
+            except Exception:
+                pass  # bad index DDL — still benchmark without it
+        perf = measure_performance(conn_bench, sql)
+    finally:
+        conn_bench.close()
+
+    score = compute_score(perf["latency_ms"], perf["explain_cost"], passed_correctness=True)
 
     return {
         "sandbox_id": sandbox_id,
+        "role": role,
         "passed": True,
         "error": None,
-        "execution_time_ms": round(execution_time_ms, 4),
-        "memory_mb": round(memory_mb, 6),
+        "latency_ms": perf["latency_ms"],
+        "rows_returned": perf["rows_returned"],
+        "explain_cost": perf["explain_cost"],
         "score": score,
-        "lines_of_code": count_lines(solution_path),
+        "sql_length": sql_length,
+    }
+
+
+def _read_role_comment(solution_path: str) -> str | None:
+    """Read the '# role: ...' comment from the top of a solution file."""
+    for line in Path(solution_path).read_text().splitlines():
+        if line.startswith("# role:"):
+            return line.removeprefix("# role:").strip()
+    return None
+
+
+def _error_result(sandbox_id: str, role: str | None, error: str, sql_length: int | None) -> dict:
+    return {
+        "sandbox_id": sandbox_id,
+        "role": role,
+        "passed": False,
+        "error": error,
+        "latency_ms": None,
+        "rows_returned": None,
+        "explain_cost": None,
+        "score": 0,
+        "sql_length": sql_length,
     }
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(json.dumps({"error": "Usage: python benchmark.py <solution_path>"}))
+    if len(sys.argv) < 3:
+        print(json.dumps({"error": "Usage: python benchmark.py <solution_path> <db_path>"}))
         sys.exit(1)
 
-    result = run_benchmark(sys.argv[1])
-    print(json.dumps(result))
+    try:
+        result = run_benchmark(sys.argv[1], sys.argv[2])
+        print(json.dumps(result))
+    except Exception as e:
+        print(json.dumps({"error": f"UNHANDLED: {e}"}))
+        sys.exit(1)

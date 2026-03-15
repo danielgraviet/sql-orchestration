@@ -6,8 +6,8 @@ a benchmark result dict.
 
 Each call to run_in_sandbox():
   1. Creates a fresh Daytona sandbox
-  2. Uploads the solution file + benchmark.py into it
-  3. Executes: python benchmark.py <solution_file>
+  2. Uploads benchmark.py, the solution, rides.db, and expected_top10.json
+  3. Executes: python benchmark.py <solution_file> <db_path>
   4. Parses the JSON result from stdout
   5. Destroys the sandbox (always, in finally)
 
@@ -24,34 +24,26 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
 SNAPSHOT = "daytonaio/sandbox:0.6.0-slim-id"
 SANDBOX_DIR = "/home/daytona"
-BENCHMARK_TIMEOUT = 10  # seconds — hard limit per sandbox execution
+BENCHMARK_TIMEOUT = 10
 
+DATA_DIR = Path("data")
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _make_error_result(sandbox_id: str, error: str) -> dict:
     return {
         "sandbox_id": sandbox_id,
+        "role": None,
         "passed": False,
         "error": error,
-        "execution_time_ms": None,
-        "memory_mb": None,
+        "latency_ms": None,
+        "rows_returned": None,
+        "explain_cost": None,
         "score": 0,
-        "lines_of_code": None,
+        "sql_length": None,
     }
 
-
-# ---------------------------------------------------------------------------
-# Core
-# ---------------------------------------------------------------------------
 
 async def run_in_sandbox(
     daytona: AsyncDaytona,
@@ -67,49 +59,32 @@ async def run_in_sandbox(
     Returns:
         Result dict matching the schema defined in benchmark.py.
     """
-    sandbox_id = solution_path.stem   # e.g. "solution_007"
+    sandbox_id = solution_path.stem
     sandbox = None
 
     try:
-        # ------------------------------------------------------------------
-        # 1. Create sandbox
-        # ------------------------------------------------------------------
         sandbox = await daytona.create(
             CreateSandboxFromSnapshotParams(
                 snapshot=SNAPSHOT,
                 language="python",
-                auto_stop_interval=2,    # auto-stop after 2 min of inactivity
-                auto_delete_interval=5,  # auto-delete 5 min after stopped
+                auto_stop_interval=2,
+                auto_delete_interval=5,
             )
         )
 
-        # ------------------------------------------------------------------
-        # 2. Upload files
-        #    benchmark.py is the test harness; solution is the candidate code.
-        #    Both land in /home/daytona/.
-        # ------------------------------------------------------------------
-        benchmark_code = Path("benchmark.py").read_bytes()
-        solution_code  = solution_path.read_bytes()
+        # upload all files the benchmark needs
+        await sandbox.fs.upload_file(Path("benchmark.py").read_bytes(),        f"{SANDBOX_DIR}/benchmark.py")
+        await sandbox.fs.upload_file(solution_path.read_bytes(),               f"{SANDBOX_DIR}/{solution_path.name}")
+        await sandbox.fs.upload_file((DATA_DIR / "rides.db").read_bytes(),     f"{SANDBOX_DIR}/rides.db")
+        await sandbox.fs.upload_file((DATA_DIR / "expected_top10.json").read_bytes(), f"{SANDBOX_DIR}/expected_top10.json")
 
-        await sandbox.fs.upload_file(benchmark_code, f"{SANDBOX_DIR}/benchmark.py")
-        await sandbox.fs.upload_file(solution_code,  f"{SANDBOX_DIR}/{solution_path.name}")
-
-        # ------------------------------------------------------------------
-        # 3. Execute benchmark
-        #    Hard timeout of BENCHMARK_TIMEOUT seconds.
-        #    stdout is expected to be a single JSON object.
-        # ------------------------------------------------------------------
         response = await sandbox.process.exec(
-            f"python {SANDBOX_DIR}/benchmark.py {SANDBOX_DIR}/{solution_path.name}",
+            f"python {SANDBOX_DIR}/benchmark.py {SANDBOX_DIR}/{solution_path.name} {SANDBOX_DIR}/rides.db",
             timeout=BENCHMARK_TIMEOUT,
         )
 
-        # ------------------------------------------------------------------
-        # 4. Parse result
-        # ------------------------------------------------------------------
         stdout = (response.result or "").strip()
 
-        # Find the JSON line (benchmark.py prints exactly one JSON object)
         result = None
         for line in stdout.splitlines():
             line = line.strip()
@@ -123,7 +98,6 @@ async def run_in_sandbox(
         if result is None:
             return _make_error_result(sandbox_id, f"FAILED_PARSE: no JSON in stdout — got: {stdout[:200]}")
 
-        # Ensure sandbox_id matches our local label even if benchmark used its own
         result["sandbox_id"] = sandbox_id
         return result
 
@@ -134,9 +108,6 @@ async def run_in_sandbox(
         return _make_error_result(sandbox_id, f"FAILED_SANDBOX: {e}")
 
     finally:
-        # Always destroy the sandbox — even if an error occurred above.
-        # auto_stop_interval + auto_delete_interval act as a safety net
-        # in case this delete call itself fails.
         if sandbox:
             try:
                 await sandbox.delete()
